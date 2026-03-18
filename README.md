@@ -1,65 +1,76 @@
 # ✈️ VoyageAI — AI-Powered Travel Planner
 
-Streamlit prototype for an AI-powered travel agency that aggregates real-time data from **4 APIs** to help users plan complete trips in one place.
+Streamlit prototype for an AI-powered travel agency that aggregates real-time data from **6 APIs** and uses **LLMs in 5 non-straightforward ways** to help users plan complete trips in one place.
 
-> **PDAI Assignment 1** — Prototyping with Streamlit
+> **PDAI Assignment 2** — Prototyping with LLMs
 
 ## 🎯 The Problem
 
-Planning a trip today means jumping between 5+ websites: Google Flights for flights, Booking.com for hotels, TripAdvisor for attractions, Google Maps for restaurants, and a weather app. VoyageAI consolidates everything into a single AI-powered interface.
+Planning a trip today means jumping between 5+ websites: Google Flights for flights, Booking.com for hotels, TripAdvisor for attractions, Google Maps for restaurants, and a weather app. VoyageAI consolidates everything into a single AI-powered interface — like having a personal travel agent powered by AI.
 
-## ✨ Features
+## ✨ 13 Tabs
 
 | Tab | Data Source | What it does |
 |-----|-----------|--------------|
 | ✈️ Flights | **Amadeus API** | Search real flights across 400+ airlines (economy, premium, business) |
-| 🏨 Hotels | **OpenAI + Google Places** | AI-recommended hotels with real Google photos, ⭐ ratings & reviews |
-| 🌤️ Weather | **Google Weather API** | Current conditions + 10-day forecast + 48h hourly chart (DeepMind AI) |
+| 🏨 Hotels | **OpenAI + Google Places** | AI-recommended hotels with real Google photos, ⭐ ratings, price levels & reviews |
+| 🌤️ Weather | **Google Weather API** | Current conditions + 10-day forecast + 48h hourly chart |
 | 🏛️ Attractions | **OpenAI + Google Places** | Famous landmarks with real photos, star ratings & Google Maps links |
-| 🍽️ Restaurants | **OpenAI + Google Places** | Restaurants by cuisine preference with photos, ratings & reviews |
+| 🍽️ Restaurants | **OpenAI + Google Places** | Restaurants with Google price levels (€/€€/€€€), photos & ratings |
 | 🌙 Nightlife | **OpenAI + Google Places** | Bars, clubs & cafes with real Google data |
-| 📋 Itinerary | **OpenAI GPT-4o-mini** | AI-generated day-by-day plan using all collected trip data |
+| 📋 Itinerary | **OpenAI** | AI-generated day-by-day plan using all collected data + Google ratings |
+| 💬 Chat | **OpenAI (multi-turn)** | Travel chatbot with RAG-like context from all trip data |
+| 💰 Budget AI | **OpenAI (structured JSON)** | Budget optimizer with charts, tips, and savings suggestions |
+| 🎵 TikTok | **OpenAI** | TikTok travel content discovery with direct search links |
+| 💱 Currency | **Frankfurter API** | Real-time exchange rates + converter |
+| 🚇 Directions | **Google Directions + Maps Embed** | Route planning with embedded Google Maps |
+| 🎒 Packing | **OpenAI** | Smart packing list based on weather + activities |
+
+## 🤖 5 Non-Straightforward LLM Features
+
+### 1. Hotels/Restaurants/Attractions → Google Places Validation Pipeline
+OpenAI generates place names in structured JSON → Python parses → calls Google Places API for each → enriches with real photos, ratings, price levels, reviews. The LLM output is **post-processed and validated** against Google data.
+
+### 2. Travel Chatbot (Multi-turn + RAG-like)
+Before each message, the app builds a context string from ALL collected data (flights, hotels with Google ratings, restaurants with Google price levels, weather, itinerary, user selections). This is injected into the system prompt — a **RAG-like pattern** using the app's own data.
+
+### 3. Budget Optimizer (Structured JSON → Charts)
+LLM generates complex JSON (score, tips with priority, daily breakdown, alternatives) → Python parses into **5 different visualizations**: score badge, metrics, expanders, bar chart by category, progress bar, alternatives table.
+
+### 4. AI Itinerary with Enriched Context
+The itinerary prompt receives restaurants with **Google price levels**, attractions with **Google ratings**, the user's **selected flight and hotel**, and **real weather data**. It uses all of this to generate a contextual, personalized plan.
+
+### 5. TikTok Content Discovery
+LLM generates structured data (search queries, creators, trending topics, video ideas) → Python creates **clickable TikTok links**, profile buttons, and categorized content cards.
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    STREAMLIT UI (app.py)                 │
-│  Sidebar (inputs) │ Tabs (flights/hotels/weather/...)   │
-│  21 widget types  │ Custom CSS + Google Fonts            │
-└─────────┬───────────────────────────────────────────────┘
-          │
-┌─────────▼───────────────────────────────────────────────┐
-│              API FUNCTIONS (api_functions.py)            │
-│                     20 functions                         │
-├─────────────┬──────────────┬──────────────┬─────────────┤
-│  Amadeus    │ Google       │ Google       │  OpenAI     │
-│  Flights    │ Weather +    │ Places (New) │  GPT-4o-    │
-│  (OAuth2)   │ Geocoding    │ Photos +     │  mini       │
-│             │              │ Ratings +    │  (JSON mode)│
-│  Real flight│ Real-time    │ Reviews      │  Hotels,    │
-│  search &   │ weather +    │              │  restaurants│
-│  pricing    │ forecasts    │ Enriches ALL │  attractions│
-│             │              │ AI results   │  nightlife, │
-│             │              │ with real    │  itinerary  │
-│             │              │ Google data  │             │
-└─────────────┴──────────────┴──────────────┴─────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    STREAMLIT UI (app.py)                      │
+│  13 tabs · Booking.com design · 23+ widget types             │
+└──────────┬───────────────────────────────────────────────────┘
+           │
+┌──────────▼───────────────────────────────────────────────────┐
+│               API FUNCTIONS (api_functions.py)                │
+│                      28+ functions                            │
+├──────────┬────────────┬────────────┬──────────┬──────────────┤
+│ Amadeus  │ Google     │ Google     │ OpenAI   │ Frankfurter  │
+│ Flights  │ Weather +  │ Places +   │ GPT-4o-  │ Exchange     │
+│ (OAuth2) │ Geocoding  │ Directions │ mini     │ Rates        │
+│          │            │ + Embed    │ (5 uses) │ (no key)     │
+└──────────┴────────────┴────────────┴──────────┴──────────────┘
 ```
-
-**Key design:** OpenAI generates recommendations with real place names → Google Places enriches each place with real photos, verified star ratings, review counts, user reviews, and Google Maps links. This creates a **validation loop** ensuring AI suggestions are real.
 
 ## 🚀 Quick Start
 
 ```bash
-git clone https://github.com/francescopolimeni05-cmd/Prototyping-Assignment-1.git
-cd Prototyping-Assignment-1
+git clone https://github.com/francescopolimeni05-cmd/Prototyping-Assignment-2.git
+cd Prototyping-Assignment-2
 pip install -r requirements.txt
 ```
 
-### Configure API Keys
-
-Create `.streamlit/secrets.toml` (this file is gitignored):
-
+Create `.streamlit/secrets.toml`:
 ```toml
 AMADEUS_CLIENT_ID = "your_id"
 AMADEUS_CLIENT_SECRET = "your_secret"
@@ -67,74 +78,41 @@ GOOGLE_API_KEY = "your_key"
 OPENAI_API_KEY = "sk-your_key"
 ```
 
-Then run:
-```bash
-streamlit run app.py
-```
+Then: `streamlit run app.py`
 
-## 🔑 API Keys (all free tier)
+## 🔑 APIs (6 total)
 
-| API | Sign Up | Free Tier | Used For |
-|-----|---------|-----------|----------|
-| Amadeus | [developers.amadeus.com](https://developers.amadeus.com/) | 2,000 req/month | Flight search |
-| Google Cloud | [console.cloud.google.com](https://console.cloud.google.com/) | $200 credit/month | Weather, Geocoding, Places photos/ratings |
-| OpenAI | [platform.openai.com](https://platform.openai.com/) | Pay-as-you-go (~$0.01/search) | Hotels, restaurants, attractions, itinerary |
+| API | Used For | Key needed |
+|-----|----------|-----------|
+| Amadeus | Flight search | Yes |
+| Google Weather | Forecasts | Yes (same key) |
+| Google Places (New) | Photos, ratings, reviews, price levels | Yes (same key) |
+| Google Directions + Embed | Route planning, embedded maps | Yes (same key) |
+| OpenAI | Content generation, chatbot, budget, itinerary, TikTok, packing | Yes |
+| Frankfurter | Exchange rates | No (free, no key) |
 
-**Google Cloud setup:** Enable these 3 APIs in your project:
-- Weather API
-- Geocoding API
-- Places API (New)
+**Google Cloud:** Enable Weather API, Geocoding API, Places API (New), Directions API, Maps Embed API.
+
+## 🎨 Design
+
+Booking.com-inspired dark blue theme (#003580) with yellow accents (#febb02), white cards on light gray background, embedded Google Maps, real Google photos and star ratings.
 
 ## 📁 Project Structure
 
 ```
 VoyageAI/
-├── app.py                  # Streamlit UI — 7 tabs, sidebar, custom CSS
-├── api_functions.py        # 20 API functions — Amadeus, Google, OpenAI
+├── app.py                  # Streamlit UI — 13 tabs, 1000+ lines
+├── api_functions.py        # 28+ API functions
 ├── requirements.txt        # streamlit, requests, pandas
 ├── secrets.toml.example    # Template for API keys
-├── .gitignore              # Protects secrets.toml
+├── .gitignore              # Protects secrets
 └── README.md
 ```
 
-## 🎨 Streamlit Widgets Used (21 types)
+## 🔒 Security
 
-**Input widgets:**
-`st.text_input` · `st.selectbox` · `st.date_input` · `st.slider` · `st.number_input` · `st.select_slider` · `st.multiselect` · `st.radio` · `st.button`
-
-**Layout widgets:**
-`st.sidebar` · `st.columns` · `st.tabs` · `st.expander`
-
-**Data display:**
-`st.metric` · `st.progress` · `st.bar_chart` · `st.line_chart` · `st.map` · `st.image` · `st.download_button`
-
-**Feedback:**
-`st.spinner` · `st.toast` · `st.success` · `st.warning` · `st.error` · `st.info` · `st.caption`
-
-**Other:**
-`st.session_state` (caching) · `st.markdown` with custom HTML/CSS · Google Fonts (Playfair Display)
-
-## 🔧 Key Technical Decisions
-
-- **API key security:** Keys stored only in `.streamlit/secrets.toml` (gitignored), never exposed in UI
-- **Session state caching:** All API results cached in `st.session_state` — switching tabs doesn't re-fetch data
-- **OpenAI JSON mode:** Uses `response_format: json_object` for reliable structured responses
-- **Google Places enrichment:** Every AI-generated place is enriched with real Google data (photos, ratings, reviews)
-- **Separation of concerns:** UI logic (`app.py`) separated from API logic (`api_functions.py`) — 20 modular functions
-- **Error handling:** All API calls wrapped in try/catch with user-friendly error messages
-- **Budget flow:** Selected flight/hotel costs flow into the itinerary tab, updating remaining daily budget
-
-## 📸 Screenshots
-
-The app features:
-- 🖼️ Hero city photo from Google Places
-- ⭐ Real star ratings with review counts on every place
-- 📸 Google Photos for hotels, restaurants, attractions, bars
-- 📊 Flight price comparison chart
-- 🌡️ Temperature trend line chart
-- 📍 Interactive map of destination
-- 💬 Real Google user reviews
+API keys stored only in `.streamlit/secrets.toml` (gitignored). On Streamlit Cloud, keys are in encrypted Secrets Management. Keys never appear in code or repository.
 
 ---
 
-*Built by Francesco Polimeni — PDAI Assignment 1, February 2026*
+*Built by Francesco Polimeni — PDAI Assignment 2, March 2026*
