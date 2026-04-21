@@ -6,9 +6,15 @@ builder = "dockerfile"
 dockerfilePath = "backend/Dockerfile"
 
 [deploy]
-startCommand = "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+# Wrap the command in `sh -c` so that $PORT (injected by Railway as an
+# environment variable) is expanded by the shell before uvicorn parses
+# its arguments. Without the wrapper, uvicorn sees the literal string
+# "$PORT" and fails with `Invalid value for '--port'`.
+startCommand = "sh -c 'uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}'"
 healthcheckPath = "/health"
-healthcheckTimeout = 30
+# First boot does a cold-start of the Chroma PersistentClient which can
+# take ~20-40s on a small Railway instance — give it some slack.
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 
 # Mount a persistent volume at /data so the SQLite file and Chroma index
