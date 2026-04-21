@@ -9,6 +9,8 @@ Two generation paths:
 The structured generator lives in `services/itinerary_service.py` so routes
 stay thin.
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -21,6 +23,8 @@ from ..schemas import (
     StructuredItinerary,
 )
 from ..services.itinerary_service import generate_structured, regen_day
+
+log = logging.getLogger("voyageai.itineraries")
 
 router = APIRouter(prefix="/itineraries", tags=["itineraries"])
 
@@ -58,19 +62,37 @@ def generate_itinerary(
     user: User = Depends(get_or_create_user),
     db: Session = Depends(get_db),
 ) -> Itinerary:
-    structured = generate_structured(payload)
-    it = Itinerary(
-        user_id=user.id,
-        trip_id=payload.trip_id,
-        destination=payload.destination,
-        days=payload.days,
-        structured=structured.model_dump(),
-        source="classic",
-    )
-    db.add(it)
-    db.commit()
-    db.refresh(it)
-    return it
+    try:
+        structured = generate_structured(payload)
+    except Exception as exc:
+        # Log the full traceback to Railway logs so we can debug, but
+        # surface a human-readable 422 to the frontend instead of a bare 500.
+        log.exception("structured itinerary generation failed: %s", exc)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not generate structured itinerary: {exc}",
+        )
+
+    try:
+        it = Itinerary(
+            user_id=user.id,
+            trip_id=payload.trip_id,
+            destination=payload.destination,
+            days=payload.days,
+            structured=structured.model_dump(),
+            source="classic",
+        )
+        db.add(it)
+        db.commit()
+        db.refresh(it)
+        return it
+    except Exception as exc:
+        log.exception("persisting itinerary failed: %s", exc)
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save itinerary: {exc}",
+        )
 
 
 @router.post("/{itinerary_id}/regen-day/{day_n}", response_model=ItineraryOut)

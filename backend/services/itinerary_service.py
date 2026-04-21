@@ -57,14 +57,24 @@ Weather: {req.weather_summary or '(unknown)'}
 Return JSON matching this schema:
 {SCHEMA_HINT}"""
 
-    data = chat_json(
-        [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=3500,
-        temperature=0.6,
-    )
+    # Scale max_tokens with trip length so 7+ day itineraries don't get
+    # truncated mid-JSON (which would raise a JSONDecodeError upstream).
+    # ~450 tokens/day + 1200 headroom for structure/summary, capped at 8k.
+    max_tokens = min(8000, 1200 + 450 * max(req.days, 1))
+
+    try:
+        data = chat_json(
+            [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.6,
+        )
+    except Exception as exc:
+        # Surface OpenAI / JSON errors as a readable message rather than a
+        # generic 500.
+        raise RuntimeError(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
 
     # Normalise — LLM sometimes wraps in extra key.
     if "days" not in data and len(data) == 1:
@@ -78,9 +88,24 @@ Return JSON matching this schema:
     #   c) {"day_1": {...}, "day_2": {...}}                  (dict-of-days)
     data["days"] = _normalise_days(data.get("days"))
 
+    # Defensive cleanup — fill in missing day titles and clean up block shapes
+    # so Pydantic validation doesn't fail on fields the LLM sometimes omits.
+    for d in data["days"]:
+        d.setdefault("title", f"Day {d.get('day_n', '?')}")
+        d["blocks"] = _normalise_blocks(d.get("blocks"))
+
     # Ensure destination field present for the Pydantic model.
     data.setdefault("destination", req.destination)
-    return StructuredItinerary.model_validate(data)
+
+    try:
+        return StructuredItinerary.model_validate(data)
+    except Exception as exc:
+        # Include a snippet of the raw data in the error so Railway logs show
+        # us what shape the LLM actually returned.
+        raw_preview = json.dumps(data, default=str)[:600]
+        raise RuntimeError(
+            f"Itinerary validation failed: {exc} · raw={raw_preview}"
+        ) from exc
 
 
 def _normalise_days(raw: object) -> list[dict]:
@@ -127,6 +152,65 @@ def _day_key_num(key: str) -> int:
     """Extract the trailing integer from strings like 'day_3' or 'Day 3'."""
     digits = "".join(ch for ch in str(key) if ch.isdigit())
     return int(digits) if digits else 0
+
+
+_LABEL_ORDER = ["morning", "afternoon", "evening"]
+
+
+def _normalise_blocks(raw: object) -> list[dict]:
+    """
+    Make sure every block has the required fields DayBlock expects:
+    `label` and `activity`. Coerce numeric fields that arrived as strings
+    (e.g. "€40" → 40.0, "30 min" → 30).
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict] = []
+    for i, b in enumerate(raw):
+        if not isinstance(b, dict):
+            continue
+        block = dict(b)
+
+        # label: fall back to positional morning/afternoon/evening.
+        label = (block.get("label") or block.get("slot") or "").strip().lower()
+        if label not in _LABEL_ORDER:
+            label = _LABEL_ORDER[i] if i < len(_LABEL_ORDER) else f"slot_{i+1}"
+        block["label"] = label
+
+        # activity: required — fall back to whatever text we have.
+        activity = block.get("activity") or block.get("description") or block.get("title")
+        if not activity:
+            activity = "Free time"
+        block["activity"] = str(activity)
+
+        # coerce numeric-ish fields.
+        block["estimated_cost_eur"] = _coerce_float(block.get("estimated_cost_eur"))
+        block["travel_minutes"] = _coerce_int(block.get("travel_minutes"))
+
+        out.append(block)
+    return out
+
+
+def _coerce_float(v: object) -> float | None:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        # strip currency symbols / non-numeric chars
+        s = "".join(ch for ch in str(v) if ch.isdigit() or ch in ".,-")
+        s = s.replace(",", ".")
+        return float(s) if s else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _coerce_int(v: object) -> int | None:
+    f = _coerce_float(v)
+    return int(f) if f is not None else None
 
 
 def regen_day(
