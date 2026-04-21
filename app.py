@@ -8,8 +8,20 @@ import json, os, time
 from datetime import timedelta, date
 import pandas as pd
 from api_functions import *
+import backend_client as api
+from ui_widgets import (
+    render_vote_ai_vs_manual,
+    render_thumbs_feedback,
+    render_sources,
+    render_structured_itinerary,
+    render_agent_trace,
+)
 
 st.set_page_config(page_title="VoyageAI", page_icon="✈️", layout="wide", initial_sidebar_state="expanded")
+
+# A3: bootstrap a stable user_id (persisted via ?uid=… query param) so every
+# vote/feedback/trip row in the backend is attributed to the same person.
+api.ensure_user_id()
 
 def K(n):
     try: return st.secrets[n]
@@ -178,12 +190,35 @@ with st.sidebar:
 
     go=st.button("🔍 Plan My Trip!",use_container_width=True,type="primary")
     if go:
-        for k in ["flights_data","hotels_data","wx_data","attr_data","rest_data","night_data","ai_itinerary","geo","city_photo","gp_cache","chat_messages","budget_analysis","tiktok_data","all_loaded","pending_chat","local_currency","exchange_rates","last_directions","packing_data"]:
+        for k in ["flights_data","hotels_data","wx_data","attr_data","rest_data","night_data","ai_itinerary","geo","city_photo","gp_cache","chat_messages","budget_analysis","tiktok_data","all_loaded","pending_chat","local_currency","exchange_rates","last_directions","packing_data","trip_id","structured_itinerary","agent_result"]:
             st.session_state.pop(k,None)
         st.session_state.search_done=True
         st.session_state.sp={"oc":orig_code,"dc":dest_code,"ocity":orig_city,"dcity":dest_city,
             "dep":dep_date,"ret":ret_date,"tvl":travelers,"bud":budget,
             "fl_b":fl_b,"ht_b":ht_b,"fd_b":fd_b,"ac_b":ac_b}
+        # A3: persist Trip row in backend so feedback/votes/chat/itinerary
+        # can reference it. Degrades to None if backend is not configured.
+        try:
+            trip_resp = api.create_trip({
+                "origin_city": orig_city or "",
+                "destination_city": dest_city or orig_city or "",
+                "depart_date": str(dep_date),
+                "return_date": str(ret_date),
+                "travelers": travelers,
+                "budget_eur": budget,
+                "style": style,
+                "interests": interests,
+                "food_prefs": food_prefs,
+                "params_snapshot": {
+                    "origin_code": orig_code or "",
+                    "dest_code": dest_code or "",
+                    "fl_b": fl_b, "ht_b": ht_b, "fd_b": fd_b, "ac_b": ac_b,
+                },
+            })
+            if trip_resp and not trip_resp.get("_error"):
+                st.session_state["trip_id"] = trip_resp.get("id")
+        except Exception:
+            pass  # backend optional — frontend still works without it
 
 # ═══ MAIN ═══
 st.markdown('<p class="hero">✈️ VoyageAI</p>',unsafe_allow_html=True)
@@ -336,7 +371,7 @@ m1,m2,m3,m4=st.columns(4)
 m1.metric("✈️ Flights",f"€{fl_b:,}"); m2.metric("🏨 Accom",f"€{ht_b:,}")
 m3.metric("🍽️ Food",f"€{fd_b:,}"); m4.metric("🎭 Activities",f"€{ac_b:,}")
 
-tabs=st.tabs(["✈️ Flights","🏨 Hotels","🌤️ Weather","🏛️ Attractions","🍽️ Restaurants","🌙 Nightlife","📋 Itinerary","💬 Chat","💰 Budget AI","🎵 TikTok","💱 Currency","🚇 Directions","🎒 Packing"])
+tabs=st.tabs(["✈️ Flights","🏨 Hotels","🌤️ Weather","🏛️ Attractions","🍽️ Restaurants","🌙 Nightlife","📋 Itinerary","💬 Chat","💰 Budget AI","🎵 TikTok","💱 Currency","🚇 Directions","🎒 Packing","🤖 AI Agent"])
 
 # ═══ FLIGHTS ═══
 with tabs[0]:
@@ -601,6 +636,78 @@ with tabs[6]:
             if st.button("🔄 Regenerate"): del st.session_state["ai_itinerary"]; st.rerun()
             st.download_button("📥 Download Itinerary",data=st.session_state["ai_itinerary"],
                 file_name=f"itinerary_{dcity}.md",mime="text/markdown",use_container_width=True)
+
+        # A3: structured multi-day itinerary (backend, JSON schema) with
+        # per-day Regenerate. Lives alongside the legacy markdown itinerary.
+        if api.is_configured():
+            st.markdown("---")
+            st.markdown("### 🗂️ Structured day-by-day view (A3)")
+            st.caption("Generates a JSON-structured itinerary you can regenerate one day at a time.")
+            gen_struct = st.button("🧱 Generate structured itinerary", key="gen_struct")
+            if gen_struct:
+                with st.spinner("Building structured itinerary…"):
+                    st.session_state["structured_itinerary"] = api.generate_structured_itinerary({
+                        "trip_id": st.session_state.get("trip_id"),
+                        "destination": dcity,
+                        "depart_date": str(dep),
+                        "return_date": str(ret),
+                        "days": trip_days,
+                        "travelers": tvl,
+                        "style": style,
+                        "interests": interests,
+                        "food_prefs": food_prefs,
+                        "daily_budget": db,
+                        "enriched_context": "\n".join(filter(None, [
+                            get_selections_str(),
+                            enriched_attractions_str(),
+                            enriched_restaurants_str(),
+                            enriched_hotels_str(),
+                        ])),
+                    })
+            struct = st.session_state.get("structured_itinerary")
+            if struct and not struct.get("_error"):
+                def _regen_day(day_n: int) -> None:
+                    itin_id = struct.get("id")
+                    if not itin_id:
+                        st.warning("Structured itinerary has no id — cannot regenerate.")
+                        return
+                    with st.spinner(f"Regenerating Day {day_n}…"):
+                        new_plan = api.regen_day(itin_id, day_n, {
+                            "destination": dcity,
+                            "depart_date": str(dep),
+                            "return_date": str(ret),
+                            "days": trip_days,
+                            "travelers": tvl,
+                            "style": style,
+                            "interests": interests,
+                            "food_prefs": food_prefs,
+                            "daily_budget": db,
+                        })
+                    if new_plan and not new_plan.get("_error"):
+                        st.session_state["structured_itinerary"] = new_plan
+                        st.rerun()
+                    else:
+                        err = (new_plan or {}).get("_error", "unknown error")
+                        st.warning(f"Could not regenerate day: {err}")
+
+                render_structured_itinerary(
+                    struct.get("structured") or struct,
+                    on_regen_day=_regen_day,
+                    key_suffix="main",
+                )
+            elif struct and struct.get("_error"):
+                st.warning(f"Backend error: {struct['_error']}")
+
+            # AI-vs-manual vote + thumbs feedback (the prof's validation ask)
+            st.markdown("---")
+            render_vote_ai_vs_manual(st.session_state.get("trip_id"), key_suffix="itin")
+            st.markdown("---")
+            render_thumbs_feedback(
+                target_type="itinerary",
+                trip_id=st.session_state.get("trip_id"),
+                key_suffix="itin",
+                title="Was this itinerary helpful?",
+            )
     else: st.warning("🔑 Add OPENAI_API_KEY")
     st.markdown("---")
     st.download_button("📥 Full Summary (JSON)",
@@ -648,18 +755,46 @@ with tabs[7]:
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = []
 
+        # A3: toggle between classic (A2) chat and RAG-augmented chat that
+        # retrieves from the travel-knowledge Chroma index in the backend.
+        use_rag = st.toggle(
+            "📚 Use RAG (Wikipedia + curated travel tips)",
+            value=api.is_configured(),
+            key="chat_use_rag",
+            help="When on, answers are grounded in retrieved travel knowledge and cite sources.",
+        )
+
+        def _ask(prompt_text: str) -> tuple[str, list[dict]]:
+            """Send the conversation to backend RAG if available, else A2 chat."""
+            if use_rag and api.is_configured():
+                resp = api.chat_rag(
+                    messages=st.session_state.chat_messages,
+                    trip_context=trip_ctx,
+                    trip_id=st.session_state.get("trip_id"),
+                    use_rag=True,
+                )
+                if resp and not resp.get("_error"):
+                    # Backend returns `content` (not `answer`); each source has
+                    # {source, score, snippet}. We pass them through as-is and
+                    # render_sources handles the keys.
+                    return resp.get("content", resp.get("answer", "")), resp.get("sources", []) or []
+                # fall through to A2 if backend fails
+            return ai_chat(OAIKEY, st.session_state.chat_messages, trip_ctx), []
+
         # Handle pending suggestion
         if "pending_chat" in st.session_state:
             pending = st.session_state.pop("pending_chat")
             st.session_state.chat_messages.append({"role":"user","content":pending})
             with st.spinner("Thinking..."):
-                response = ai_chat(OAIKEY, st.session_state.chat_messages, trip_ctx)
-            st.session_state.chat_messages.append({"role":"assistant","content":response})
+                response, sources = _ask(pending)
+            st.session_state.chat_messages.append({"role":"assistant","content":response,"sources":sources})
 
         # Display chat history
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if msg.get("sources"):
+                    render_sources(msg["sources"])
 
         # Chat input
         if prompt := st.chat_input("Ask anything about your trip..."):
@@ -668,9 +803,11 @@ with tabs[7]:
                 st.markdown(prompt)
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    response = ai_chat(OAIKEY, st.session_state.chat_messages, trip_ctx)
+                    response, sources = _ask(prompt)
                 st.markdown(response)
-            st.session_state.chat_messages.append({"role":"assistant","content":response})
+                if sources:
+                    render_sources(sources)
+            st.session_state.chat_messages.append({"role":"assistant","content":response,"sources":sources})
 
         # Quick question suggestions
         if not st.session_state.chat_messages:
@@ -693,6 +830,15 @@ with tabs[7]:
             if st.button("🗑️ Clear chat"):
                 st.session_state.chat_messages = []
                 st.rerun()
+
+        # A3: thumbs feedback on the chat experience
+        st.markdown("---")
+        render_thumbs_feedback(
+            target_type="chat",
+            trip_id=st.session_state.get("trip_id"),
+            key_suffix="chat",
+            title="Was the chat assistant helpful?",
+        )
 
 # ═══ BUDGET AI (Optimizer with structured output + charts) ═══
 with tabs[8]:
@@ -782,6 +928,15 @@ with tabs[8]:
             if st.button("🔄 Re-analyze"):
                 del st.session_state["budget_analysis"]
                 st.rerun()
+
+        # A3: thumbs feedback on the budget analysis
+        st.markdown("---")
+        render_thumbs_feedback(
+            target_type="budget",
+            trip_id=st.session_state.get("trip_id"),
+            key_suffix="budget",
+            title="Was the budget analysis useful?",
+        )
 
 # ═══ TIKTOK (AI-powered travel content discovery) ═══
 with tabs[9]:
@@ -1035,6 +1190,84 @@ with tabs[12]:
             if st.button("🔄 Regenerate packing list"):
                 del st.session_state["packing_data"]
                 st.rerun()
+
+        # A3: thumbs feedback on the packing list
+        st.markdown("---")
+        render_thumbs_feedback(
+            target_type="packing",
+            trip_id=st.session_state.get("trip_id"),
+            key_suffix="packing",
+            title="Was the packing list helpful?",
+        )
+
+# ═══ AI AGENT (A3: agentic planner with function-calling) ═══
+with tabs[13]:
+    st.markdown("### 🤖 AI Travel Agent")
+    st.caption(
+        "Give the agent a goal in natural language. It decides which tools to "
+        "call (flights, hotels, weather, attractions…) and composes a plan."
+    )
+    if not api.is_configured():
+        st.info(
+            "🔌 The AI Agent runs on the VoyageAI backend. "
+            "Set `BACKEND_URL` in `.streamlit/secrets.toml` to enable it."
+        )
+    else:
+        default_goal = (
+            f"Plan a {trip_days}-day trip to {dcity} for {tvl} travelers on a "
+            f"€{bud} budget, style {style}, interests: {', '.join(interests)}."
+        )
+        goal = st.text_area(
+            "🎯 Your goal",
+            value=default_goal,
+            height=100,
+            key="agent_goal",
+            help="The agent will call 1–8 tools to satisfy this goal.",
+        )
+        col_run, col_clear = st.columns([3, 1])
+        with col_run:
+            run_agent_btn = st.button(
+                "🚀 Run agent",
+                type="primary",
+                use_container_width=True,
+                key="agent_run",
+            )
+        with col_clear:
+            if st.button("🗑️ Clear", use_container_width=True, key="agent_clear"):
+                st.session_state.pop("agent_result", None)
+                st.rerun()
+
+        if run_agent_btn and goal.strip():
+            with st.spinner("🤖 Agent is thinking, calling tools, composing a plan… (~30s)"):
+                st.session_state["agent_result"] = api.run_agent(
+                    goal=goal.strip(),
+                    trip_id=st.session_state.get("trip_id"),
+                )
+
+        result = st.session_state.get("agent_result")
+        if result and result.get("_error"):
+            st.error(f"Agent error: {result['_error']}")
+        elif result:
+            final_message = result.get("final_message")
+            if final_message:
+                st.markdown("#### 📝 Agent summary")
+                st.markdown(final_message)
+
+            final_plan = result.get("final_plan")
+            if final_plan:
+                st.markdown("#### 🗂️ Proposed plan")
+                render_structured_itinerary(final_plan, key_suffix="agent")
+
+            steps = result.get("steps") or []
+            render_agent_trace(steps)
+
+            st.markdown("---")
+            render_thumbs_feedback(
+                target_type="agent",
+                trip_id=st.session_state.get("trip_id"),
+                key_suffix="agent",
+                title="Was the agent plan useful?",
+            )
 
 st.markdown("---")
 st.markdown("""<div style="text-align:center;padding:1.5rem;background:#003580;border-radius:8px;margin-top:1rem">

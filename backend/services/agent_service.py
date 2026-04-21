@@ -1,0 +1,319 @@
+"""
+Agentic trip planner — OpenAI function-calling loop.
+
+Exposes a small set of tools backed by the existing VoyageAI API layer
+(amadeus, google places, openai content generation). The LLM decides which
+to call in which order given a freeform user goal.
+
+We intentionally keep the loop short (max_steps=8) to bound latency/cost for
+a prototype. Each step is recorded for the frontend to display a progress
+trace.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Callable
+
+from .. import config
+from ..schemas import (
+    AgentPlanRequest,
+    AgentPlanResponse,
+    AgentStep,
+    DayBlock,
+    DayPlan,
+    StructuredItinerary,
+)
+from .openai_client import client as openai_client
+from .itinerary_service import generate_structured
+from ..schemas import ItineraryGenerateRequest
+
+# We reuse the A2 api_functions directly — they live one level up in the repo.
+# This import works because backend/ is a sibling of api_functions.py.
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import api_functions as af  # type: ignore
+
+
+# ── Tool implementations ───────────────────────────────────────────────────
+
+def _tool_search_flights(origin_iata: str, destination_iata: str, depart: str, ret: str, adults: int = 1) -> dict:
+    tok = af.get_amadeus_token(config.AMADEUS_CLIENT_ID, config.AMADEUS_CLIENT_SECRET)
+    if not tok:
+        return {"error": "Amadeus auth failed"}
+    raw = af.search_flights(tok, origin_iata, destination_iata, depart, ret, adults)
+    flights = af.parse_flights(raw) if not (isinstance(raw, dict) and "_error" in raw) else []
+    return {"count": len(flights), "cheapest": flights[0] if flights else None}
+
+
+def _tool_search_hotels(city: str, nights: int, budget_per_night: float) -> dict:
+    return {"hotels": af.ai_hotels(config.OPENAI_API_KEY, city, "hotel", nights, budget_per_night)}
+
+
+def _tool_search_restaurants(city: str, food_prefs: list[str], daily_budget: float) -> dict:
+    return {"restaurants": af.ai_restaurants(config.OPENAI_API_KEY, city, food_prefs, daily_budget)}
+
+
+def _tool_search_attractions(city: str, interests: list[str]) -> dict:
+    return {"attractions": af.ai_attractions(config.OPENAI_API_KEY, city, interests)}
+
+
+def _tool_get_weather(city: str) -> dict:
+    lat, lng = af.geocode_city(city, config.GOOGLE_API_KEY)
+    if not lat:
+        return {"error": f"Could not geocode {city}"}
+    daily = af.gw_daily(lat, lng, config.GOOGLE_API_KEY, 10) or {}
+    fd = daily.get("forecastDays", [])[:5]
+    summary = ", ".join(
+        f"{d.get('maxTemperature',{}).get('degrees','?')}°/{d.get('minTemperature',{}).get('degrees','?')}°"
+        for d in fd
+    )
+    return {"summary": summary, "days": len(fd)}
+
+
+def _tool_compose_itinerary(
+    destination: str,
+    depart: str,
+    ret: str,
+    days: int,
+    travelers: int,
+    style: str,
+    interests: list[str],
+    food_prefs: list[str],
+    daily_budget: float,
+    enriched_context: str = "",
+    weather_summary: str = "",
+) -> dict:
+    req = ItineraryGenerateRequest(
+        destination=destination,
+        depart_date=depart,
+        return_date=ret,
+        days=days,
+        travelers=travelers,
+        style=style,
+        interests=interests,
+        food_prefs=food_prefs,
+        daily_budget=daily_budget,
+        enriched_context=enriched_context,
+        weather_summary=weather_summary,
+    )
+    plan = generate_structured(req)
+    return plan.model_dump()
+
+
+TOOL_IMPL: dict[str, Callable[..., dict]] = {
+    "search_flights": _tool_search_flights,
+    "search_hotels": _tool_search_hotels,
+    "search_restaurants": _tool_search_restaurants,
+    "search_attractions": _tool_search_attractions,
+    "get_weather": _tool_get_weather,
+    "compose_itinerary": _tool_compose_itinerary,
+}
+
+
+# ── OpenAI tool schemas ───────────────────────────────────────────────────
+
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_flights",
+            "description": "Search round-trip flights between two IATA codes. Returns the cheapest option.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "origin_iata": {"type": "string", "description": "Origin IATA code, e.g. 'BCN'"},
+                    "destination_iata": {"type": "string", "description": "Destination IATA code, e.g. 'NRT'"},
+                    "depart": {"type": "string", "description": "YYYY-MM-DD"},
+                    "ret": {"type": "string", "description": "YYYY-MM-DD"},
+                    "adults": {"type": "integer", "default": 1},
+                },
+                "required": ["origin_iata", "destination_iata", "depart", "ret"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_hotels",
+            "description": "Find hotels in a city for N nights under a nightly budget.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "nights": {"type": "integer"},
+                    "budget_per_night": {"type": "number"},
+                },
+                "required": ["city", "nights", "budget_per_night"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_restaurants",
+            "description": "Find restaurants in a city given food preferences and a daily food budget.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "food_prefs": {"type": "array", "items": {"type": "string"}},
+                    "daily_budget": {"type": "number"},
+                },
+                "required": ["city", "food_prefs", "daily_budget"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_attractions",
+            "description": "List famous attractions in a city filtered by interests.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "interests": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["city", "interests"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get a 5-day weather summary for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compose_itinerary",
+            "description": "Compose the final multi-day structured itinerary. Call this LAST once you have gathered flights/hotels/restaurants/attractions/weather.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "destination": {"type": "string"},
+                    "depart": {"type": "string"},
+                    "ret": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "travelers": {"type": "integer"},
+                    "style": {"type": "string"},
+                    "interests": {"type": "array", "items": {"type": "string"}},
+                    "food_prefs": {"type": "array", "items": {"type": "string"}},
+                    "daily_budget": {"type": "number"},
+                    "enriched_context": {"type": "string"},
+                    "weather_summary": {"type": "string"},
+                },
+                "required": [
+                    "destination", "depart", "ret", "days", "travelers",
+                    "style", "interests", "food_prefs", "daily_budget",
+                ],
+            },
+        },
+    },
+]
+
+
+AGENT_SYSTEM = """You are VoyageAI's autonomous trip planner.
+
+Given a user's freeform goal, plan what tools to call, gather data, then
+compose a final multi-day itinerary. You may call tools multiple times.
+When done, ALWAYS end by calling `compose_itinerary` with all the data you
+have gathered, then reply with a short summary message.
+
+Guidelines:
+- Start by extracting: destination, dates (assume next available weekend if
+  unspecified), number of days, travelers, budget, style, interests, food
+  preferences. Ask the LLM only if absolutely necessary; otherwise infer
+  reasonable defaults.
+- Call `get_weather` early to inform the plan.
+- Always call `compose_itinerary` last with a rich `enriched_context`
+  string built from the other tool outputs.
+- Keep total tool calls <= 6.
+"""
+
+
+def run_agent(req: AgentPlanRequest, max_steps: int = 8) -> AgentPlanResponse:
+    """Run the function-calling loop."""
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": AGENT_SYSTEM},
+        {"role": "user", "content": req.goal},
+    ]
+
+    steps: list[AgentStep] = []
+    final_plan: StructuredItinerary | None = None
+    final_message = ""
+
+    for _ in range(max_steps):
+        resp = openai_client().chat.completions.create(
+            model=config.CHAT_MODEL,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+            temperature=0.3,
+        )
+        msg = resp.choices[0].message
+
+        if not msg.tool_calls:
+            final_message = msg.content or ""
+            messages.append({"role": "assistant", "content": final_message})
+            break
+
+        # Record the assistant message with tool calls so the loop can continue.
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ],
+        })
+
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+
+            impl = TOOL_IMPL.get(name)
+            if impl is None:
+                output: dict = {"error": f"unknown tool {name}"}
+            else:
+                try:
+                    output = impl(**args)
+                except Exception as e:  # surface to the model so it can recover
+                    output = {"error": f"{type(e).__name__}: {e}"}
+
+            if name == "compose_itinerary" and "days" in output:
+                try:
+                    final_plan = StructuredItinerary.model_validate(output)
+                except Exception:
+                    pass
+
+            steps.append(AgentStep(
+                tool=name,
+                args=args,
+                output_summary=json.dumps(output)[:400],
+            ))
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "name": name,
+                "content": json.dumps(output)[:6000],  # cap tool output size
+            })
+    else:
+        final_message = final_message or "Agent reached max steps without finalising."
+
+    return AgentPlanResponse(steps=steps, final_plan=final_plan, final_message=final_message)
