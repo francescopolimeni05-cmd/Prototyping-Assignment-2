@@ -109,10 +109,34 @@ def regen_day_endpoint(
     if not it.structured:
         raise HTTPException(status_code=400, detail="Itinerary has no structured plan to regenerate")
 
-    structured = StructuredItinerary.model_validate(it.structured)
-    updated = regen_day(structured, day_n, payload)
-    it.structured = updated.model_dump()
-    it.source = "regen_day"
-    db.commit()
-    db.refresh(it)
-    return it
+    try:
+        structured = StructuredItinerary.model_validate(it.structured)
+    except Exception as exc:
+        log.exception("stored structured itinerary is corrupt: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Stored itinerary is invalid: {exc}",
+        )
+
+    try:
+        updated = regen_day(structured, day_n, payload)
+    except Exception as exc:
+        log.exception("regen_day failed: %s", exc)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not regenerate day {day_n}: {exc}",
+        )
+
+    try:
+        it.structured = updated.model_dump()
+        it.source = "regen_day"
+        db.commit()
+        db.refresh(it)
+        return it
+    except Exception as exc:
+        log.exception("persisting regen_day result failed: %s", exc)
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save regenerated day: {exc}",
+        )

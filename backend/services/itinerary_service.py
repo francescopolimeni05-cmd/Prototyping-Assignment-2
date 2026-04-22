@@ -237,12 +237,37 @@ Constraints for day {day_n}:
 
 Return JSON: {{"day_n": {day_n}, "title": "...", "blocks": [ ... three blocks morning/afternoon/evening ... ]}}"""
 
-    data = chat_json(
-        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-        max_tokens=1200,
-        temperature=0.7,
-    )
-    new_day = DayPlan.model_validate(data)
+    try:
+        data = chat_json(
+            [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+            max_tokens=1500,
+            temperature=0.7,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"LLM call failed: {type(exc).__name__}: {exc}") from exc
+
+    # LLM sometimes wraps the day (e.g. {"day_4": {...}} or {"day": {...}}).
+    # Peel one level of wrapping and normalise field names.
+    if "blocks" not in data and "day_n" not in data and len(data) == 1:
+        inner = next(iter(data.values()))
+        if isinstance(inner, dict):
+            data = inner
+
+    # Some models return {"day": 4, ...} instead of {"day_n": 4, ...}.
+    if "day_n" not in data and "day" in data:
+        data["day_n"] = data.pop("day")
+    data.setdefault("day_n", day_n)
+    data.setdefault("title", f"Day {day_n}")
+
+    data["blocks"] = _normalise_blocks(data.get("blocks"))
+
+    try:
+        new_day = DayPlan.model_validate(data)
+    except Exception as exc:
+        raw_preview = json.dumps(data, default=str)[:500]
+        raise RuntimeError(
+            f"Day validation failed: {exc} · raw={raw_preview}"
+        ) from exc
 
     # Replace in place.
     updated_days = [new_day if d.day_n == day_n else d for d in existing.days]
