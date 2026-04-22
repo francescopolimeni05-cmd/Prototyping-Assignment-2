@@ -4,6 +4,13 @@ Retrieval interface consumed by the chat service.
 Embeds the query, pulls top-k from Chroma, returns a list of dicts
 {source, score, text}. If the collection is empty or embeddings fail we
 return [] — callers treat that as "no retrieval, answer anyway".
+
+Relevance thresholds:
+  - MIN_FILTER_RELEVANCE: if the city-filtered best match is weaker than
+    this, we assume the user's question isn't actually about the hint city
+    and fall back to unfiltered semantic search.
+  - MIN_RESULT_RELEVANCE: final chunks with score below this are dropped
+    from the returned list so the Sources UI doesn't show noise.
 """
 from __future__ import annotations
 
@@ -12,6 +19,13 @@ from typing import Any
 from .. import config
 from ..services.openai_client import embed
 from .store import get_collection
+
+
+# Tuned against MiniLM-style embeddings where scores ~0.2-0.3 are basically
+# "unrelated content that happened to share a few tokens". Anything above
+# 0.35 tends to be genuinely on-topic.
+MIN_FILTER_RELEVANCE = 0.30
+MIN_RESULT_RELEVANCE = 0.25
 
 
 def retrieve(query: str, destination_hint: str = "", k: int | None = None) -> list[dict[str, Any]]:
@@ -49,10 +63,21 @@ def retrieve(query: str, destination_hint: str = "", k: int | None = None) -> li
                 n_results=k,
                 where=where,
             )
-            # If the filter matched nothing, fall through to unfiltered.
             docs0 = (res.get("documents") or [[]])[0]
+            dists0 = (res.get("distances") or [[]])[0]
             if not docs0:
+                # Filter matched nothing → fall through to unfiltered.
                 res = None
+            elif dists0:
+                # Filter matched, but check if the best result is actually
+                # relevant. If the user asks about a city different from
+                # the trip destination (e.g. "how far is NY from LA?" while
+                # their trip is set to Barcelona), every chunk in the
+                # filtered set will be off-topic. Fall back to unfiltered
+                # semantic search instead of returning low-score noise.
+                best_score = 1.0 - min(dists0)
+                if best_score < MIN_FILTER_RELEVANCE:
+                    res = None
         except Exception:
             res = None
 
@@ -71,9 +96,14 @@ def retrieve(query: str, destination_hint: str = "", k: int | None = None) -> li
 
     chunks = []
     for text, meta, dist in zip(docs, metas, dists):
+        score = float(1.0 - dist) if dist is not None else 0.0
+        # Drop chunks that are clearly off-topic — better to show zero
+        # sources than to mislead the user with irrelevant citations.
+        if score < MIN_RESULT_RELEVANCE:
+            continue
         chunks.append({
             "text": text,
             "source": meta.get("source", "unknown"),
-            "score": float(1.0 - dist) if dist is not None else 0.0,
+            "score": score,
         })
     return chunks
