@@ -146,32 +146,116 @@ def search_flights(token, orig, dest, dep, ret, adults):
 
 
 # ── Mock flight generator (used when Amadeus TEST is down) ────────────────
+#
+# Carriers are chosen per-route, not from a single global pool. Picking at
+# random from every airline in the world produced nonsense like "Delta
+# FCO→BCN" (Delta doesn't fly European short-haul). The per-zone map below
+# restricts each route to carriers that realistically serve it.
+#
+# NOTE: This entire block is a fallback. As soon as the Amadeus TEST API
+# starts returning offers again (it frequently 500s on the free tier) the
+# real carriers/prices/times from Amadeus take over automatically — no
+# code change needed. See `search_flights` above.
 
-_MOCK_CARRIERS = {
-    "AF": "Air France", "BA": "British Airways", "IB": "Iberia",
-    "LH": "Lufthansa", "KL": "KLM", "U2": "easyJet", "FR": "Ryanair",
-    "TK": "Turkish Airlines", "EK": "Emirates", "QR": "Qatar Airways",
-    "SQ": "Singapore Airlines", "DL": "Delta", "AA": "American Airlines",
+# Airports → zone. Extracted so both the distance estimator and the
+# carrier picker share one source of truth.
+_ZONES = {
+    "Europe": {"CDG","ORY","FCO","CIA","BCN","AMS","LHR","LGW","STN","BER","VIE","PRG","LIS","MAD","IST","SAW","ATH","DUB","CPH","ARN","OSL","KEF","MXP","LIN","ZRH","FRA","MUC"},
+    "NA":     {"JFK","EWR","LGA","LAX","SFO","ORD","MDW","MIA","MEX"},
+    "SA":     {"EZE","GIG","SDU"},
+    "Asia":   {"HND","NRT","KIX","ICN","GMP","BKK","DMK","SIN","HKG","DPS","HAN","KUL"},
+    "ME":     {"DXB","DOH"},
+    "Africa": {"CAI","RAK","CPT"},
+    "Oceania":{"SYD","AKL"},
 }
+
+
+def _zone_of(code: str) -> str:
+    for z, codes in _ZONES.items():
+        if code in codes:
+            return z
+    return "Unknown"
+
+
+# Carriers that actually operate between two zones. Key is a frozenset so
+# (Europe, NA) and (NA, Europe) share the same entry. Mixes flag carriers
+# and low-cost where relevant. Kept short (≤10) — we only need a
+# plausible sample, not every operator.
+_CARRIERS_BY_ZONE_PAIR: dict[frozenset, list[tuple[str, str]]] = {
+    frozenset({"Europe"}): [
+        ("VY", "Vueling"),        ("FR", "Ryanair"),        ("U2", "easyJet"),
+        ("W6", "Wizz Air"),       ("IB", "Iberia"),         ("AZ", "ITA Airways"),
+        ("LH", "Lufthansa"),      ("AF", "Air France"),     ("KL", "KLM"),
+        ("BA", "British Airways"),("LX", "Swiss"),
+    ],
+    frozenset({"Europe", "NA"}): [
+        ("LH", "Lufthansa"),      ("AF", "Air France"),     ("BA", "British Airways"),
+        ("KL", "KLM"),            ("DL", "Delta"),          ("AA", "American Airlines"),
+        ("UA", "United"),         ("IB", "Iberia"),         ("AZ", "ITA Airways"),
+        ("VS", "Virgin Atlantic"),
+    ],
+    frozenset({"NA"}): [
+        ("DL", "Delta"),          ("AA", "American Airlines"), ("UA", "United"),
+        ("WN", "Southwest"),      ("B6", "JetBlue"),           ("AS", "Alaska Airlines"),
+    ],
+    frozenset({"Europe", "ME"}): [
+        ("EK", "Emirates"),       ("QR", "Qatar Airways"),  ("TK", "Turkish Airlines"),
+        ("EY", "Etihad"),         ("LH", "Lufthansa"),      ("AF", "Air France"),
+        ("BA", "British Airways"),
+    ],
+    frozenset({"Europe", "Asia"}): [
+        ("EK", "Emirates"),       ("QR", "Qatar Airways"),  ("TK", "Turkish Airlines"),
+        ("SQ", "Singapore Airlines"), ("CX", "Cathay Pacific"),
+        ("LH", "Lufthansa"),      ("AF", "Air France"),     ("KL", "KLM"),
+    ],
+    frozenset({"Europe", "Africa"}): [
+        ("TK", "Turkish Airlines"),   ("AF", "Air France"),     ("LH", "Lufthansa"),
+        ("EK", "Emirates"),           ("AT", "Royal Air Maroc"),("ET", "Ethiopian Airlines"),
+        ("MS", "EgyptAir"),
+    ],
+    frozenset({"NA", "Asia"}): [
+        ("NH", "ANA"),            ("JL", "Japan Airlines"), ("CX", "Cathay Pacific"),
+        ("KE", "Korean Air"),     ("SQ", "Singapore Airlines"),
+        ("DL", "Delta"),          ("UA", "United"),         ("AA", "American Airlines"),
+    ],
+    frozenset({"NA", "SA"}): [
+        ("LA", "LATAM Airlines"), ("AA", "American Airlines"),
+        ("DL", "Delta"),          ("CM", "Copa Airlines"),  ("AV", "Avianca"),
+    ],
+    frozenset({"Europe", "SA"}): [
+        ("IB", "Iberia"),         ("UX", "Air Europa"),     ("LA", "LATAM Airlines"),
+        ("AR", "Aerolíneas Argentinas"), ("LH", "Lufthansa"), ("AF", "Air France"),
+        ("KL", "KLM"),            ("AZ", "ITA Airways"),
+    ],
+    frozenset({"Europe", "Oceania"}): [
+        ("QF", "Qantas"),         ("EK", "Emirates"),       ("SQ", "Singapore Airlines"),
+        ("QR", "Qatar Airways"),
+    ],
+    frozenset({"Asia", "ME"}): [
+        ("EK", "Emirates"),       ("QR", "Qatar Airways"),  ("EY", "Etihad"),
+        ("SQ", "Singapore Airlines"), ("CX", "Cathay Pacific"),
+    ],
+}
+
+# Generic long-haul fallback when we can't match either zone.
+_DEFAULT_CARRIERS: list[tuple[str, str]] = [
+    ("LH", "Lufthansa"), ("AF", "Air France"), ("EK", "Emirates"),
+    ("TK", "Turkish Airlines"), ("QR", "Qatar Airways"),
+]
+
+
+def _carriers_for_route(orig: str, dest: str) -> list[tuple[str, str]]:
+    """Realistic pool of carriers that would plausibly fly orig → dest."""
+    zo, zd = _zone_of(orig), _zone_of(dest)
+    key = frozenset({zo, zd}) if zo and zd and "Unknown" not in (zo, zd) else None
+    if key and key in _CARRIERS_BY_ZONE_PAIR:
+        return _CARRIERS_BY_ZONE_PAIR[key]
+    return _DEFAULT_CARRIERS
 
 
 def _rough_distance_km(orig: str, dest: str) -> int:
     """Crude distance estimator keyed by IATA → continent. Good enough for pricing."""
-    zones = {
-        "Europe": {"CDG","ORY","FCO","CIA","BCN","AMS","LHR","LGW","STN","BER","VIE","PRG","LIS","MAD","IST","SAW","ATH","DUB","CPH","ARN","OSL","KEF","MXP","LIN","ZRH","FRA","MUC"},
-        "NA": {"JFK","EWR","LGA","LAX","SFO","ORD","MDW","MIA","MEX"},
-        "SA": {"EZE","GIG","SDU"},
-        "Asia": {"HND","NRT","KIX","ICN","GMP","BKK","DMK","SIN","HKG","DPS","HAN","KUL"},
-        "ME": {"DXB","DOH"},
-        "Africa": {"CAI","RAK","CPT"},
-        "Oceania": {"SYD","AKL"},
-    }
-    def zone_of(code):
-        for z, codes in zones.items():
-            if code in codes:
-                return z
-        return "Unknown"
-    zo, zd = zone_of(orig), zone_of(dest)
+    zo, zd = _zone_of(orig), _zone_of(dest)
     if zo == zd == "Europe": return 1200
     if zo == zd == "NA": return 3500
     if {zo, zd} == {"Europe", "NA"}: return 7000
@@ -196,7 +280,13 @@ def _mock_flight_response(orig: str, dest: str, dep: str, ret: str, adults: int)
     base = 60 + km * 0.055  # EUR per leg, roughly
     dur_min = int(90 + km / 13)  # crude flight time
 
-    carriers_pool = rng.sample(list(_MOCK_CARRIERS), k=5)
+    # Pick only carriers that actually fly this zone pair (e.g. Vueling
+    # and Ryanair for FCO→BCN, not Delta). Fall back to the generic pool
+    # if the route isn't in our map.
+    route_carriers = _carriers_for_route(orig, dest)
+    k = min(5, len(route_carriers))
+    carriers_pool = [c for c, _ in rng.sample(route_carriers, k=k)]
+    carrier_names = {c: n for c, n in route_carriers if c in carriers_pool}
     offers = []
     # Cabin price multipliers
     cabins = [("ECONOMY", 1.0), ("ECONOMY", 1.15), ("ECONOMY", 1.3),
@@ -231,7 +321,7 @@ def _mock_flight_response(orig: str, dest: str, dep: str, ret: str, adults: int)
 
     return {
         "data": offers,
-        "dictionaries": {"carriers": {c: n for c, n in _MOCK_CARRIERS.items() if c in carriers_pool}},
+        "dictionaries": {"carriers": carrier_names},
         "_mock": True,  # consumers can show a "cached data" caption
     }
 
