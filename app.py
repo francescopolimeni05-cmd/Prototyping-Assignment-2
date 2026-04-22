@@ -813,6 +813,12 @@ with tabs[7]:
                 st.markdown(response)
                 if sources:
                     render_sources(sources)
+                elif use_rag and api.is_configured():
+                    st.caption(
+                        "ℹ️ No knowledge base sources retrieved — the RAG index "
+                        "may be empty. Run `python -m backend.rag.ingest` on "
+                        "Railway to populate it, or check `/rag/status`."
+                    )
             st.session_state.chat_messages.append({"role":"assistant","content":response,"sources":sources})
 
         # Quick question suggestions

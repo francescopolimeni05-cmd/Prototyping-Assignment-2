@@ -36,6 +36,16 @@ def create_app() -> FastAPI:
     def health() -> dict:
         return {"status": "ok", "version": app.version}
 
+    @app.get("/rag/status", tags=["meta"])
+    def rag_status() -> dict:
+        """How many chunks are indexed? Useful to verify the RAG ingest ran."""
+        try:
+            from .rag.store import get_collection
+            coll = get_collection()
+            return {"indexed_chunks": coll.count(), "collection": coll.name}
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}", "indexed_chunks": 0}
+
     app.include_router(users.router)
     app.include_router(trips.router)
     app.include_router(chat.router)
