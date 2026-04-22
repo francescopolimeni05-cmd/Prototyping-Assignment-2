@@ -34,7 +34,14 @@ def create_app() -> FastAPI:
 
     @app.get("/health", tags=["meta"])
     def health() -> dict:
-        return {"status": "ok", "version": app.version}
+        # `build` is a sentinel to verify which commit is actually live on
+        # Railway. Bump manually when you push — if /health doesn't show the
+        # new value, Railway didn't rebuild.
+        return {
+            "status": "ok",
+            "version": app.version,
+            "build": "2026-04-22-agent-fixes",
+        }
 
     @app.get("/rag/status", tags=["meta"])
     def rag_status() -> dict:
