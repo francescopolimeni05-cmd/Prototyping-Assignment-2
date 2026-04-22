@@ -327,9 +327,21 @@ def load_all():
     """Pre-load all API data so tabs don't block each other"""
     dht=ht_b/trip_days if trip_days>0 else ht_b
     dfb=fd_b/trip_days if trip_days>0 else fd_b
-    # Flights
-    if "flights_data" not in st.session_state and amadeus_token:
-        raw=search_flights(amadeus_token,oc,dc,dep.strftime("%Y-%m-%d"),ret.strftime("%Y-%m-%d"),tvl)
+    # Flights — invalidate any stale cached data from a previous code version,
+    # otherwise a browser tab that was open before the last Railway/Streamlit
+    # redeploy would keep showing the old (bad) Amadeus sandbox data.
+    if st.session_state.get("flights_version") != FLIGHT_LOGIC_VERSION:
+        for k in ("flights_data", "flights_source", "flights_route"):
+            st.session_state.pop(k, None)
+        st.session_state.flights_version = FLIGHT_LOGIC_VERSION
+    # Also invalidate if the route/dates changed since last load.
+    route_key = f"{oc}-{dc}-{dep.isoformat()}-{ret.isoformat()}-{tvl}"
+    if st.session_state.get("flights_route") != route_key:
+        for k in ("flights_data", "flights_source"):
+            st.session_state.pop(k, None)
+        st.session_state.flights_route = route_key
+    if "flights_data" not in st.session_state:
+        raw=search_flights(amadeus_token or "",oc,dc,dep.strftime("%Y-%m-%d"),ret.strftime("%Y-%m-%d"),tvl)
         st.session_state.flights_data=[] if (isinstance(raw,dict) and "_error" in raw) else parse_flights(raw)
         # Track whether the results came from the Amadeus mock fallback so the
         # UI can surface a banner ("API down — simulated flights").
@@ -379,9 +391,11 @@ tabs=st.tabs(["✈️ Flights","🏨 Hotels","🌤️ Weather","🏛️ Attracti
 
 # ═══ FLIGHTS ═══
 with tabs[0]:
-    if not amadeus_token: st.info("🔑 Add AMADEUS keys")
+    flights=st.session_state.get("flights_data",[])
+    # Only demand an Amadeus key if the mock is disabled AND we have nothing.
+    if not amadeus_token and st.session_state.get("flights_source")!="mock" and not flights:
+        st.info("🔑 Add AMADEUS keys")
     else:
-        flights=st.session_state.get("flights_data",[])
         if st.session_state.get("flights_source")=="mock":
             st.warning("⚠️ **Amadeus API is temporarily unavailable** — showing simulated flights for demo purposes. Prices and airlines are indicative.")
         if flights:

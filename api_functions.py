@@ -22,6 +22,11 @@ import requests, json
 # wired up and you actually want live offers.
 USE_AMADEUS_LIVE = os.environ.get("USE_AMADEUS_LIVE", "0") == "1"
 
+# Bump this string on any flight-logic change so the Streamlit frontend can
+# invalidate any `st.session_state.flights_data` cached from a previous
+# code version (session_state survives browser reloads inside a tab).
+FLIGHT_LOGIC_VERSION = "2026-04-22-mock-only-v2"
+
 # ════════════════════════════════════════
 # AMADEUS — Flights
 # ════════════════════════════════════════
